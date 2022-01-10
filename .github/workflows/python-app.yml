@@ -28,3 +28,4 @@ jobs:
     - name: Test with pytest
       run: |
         pytest test_complex.py
+        pytest test_quaternion.py
