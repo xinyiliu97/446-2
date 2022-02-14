@@ -331,7 +331,7 @@ class Timestepper:
 
             if self.a0_old != a[0] or self.b0_old != b[0]:
                 LHS = P @ (a[0]*p.M + b[0]*p.L) @ P.T
-                p.LU = spla.splu(LHS)
+                p.LU = spla.splu(LHS.astype(problem.dtype))
             Xbar = p.LU.solve(p.RHS)
             X.vector = P.T @ Xbar
             X.scatter(p)
