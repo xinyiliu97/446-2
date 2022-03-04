@@ -28,5 +28,4 @@ jobs:
         pip install scipy
     - name: Test with pytest
       run: |
-        pytest test_KdV.py
-        pytest test_SHE.py
+        pytest test_soundwaves.py
