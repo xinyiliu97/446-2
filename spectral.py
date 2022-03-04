@@ -23,12 +23,57 @@ def reshape_vector(data, dim=2, axis=-1):
     shape[axis] = data.size
     return data.reshape(shape)
 
+def apply_matrix(matrix, array, axis, **kw):
+    """Contract any direction of a multidimensional array with a matrix."""
+    dim = len(array.shape)
+    # Build Einstein signatures
+    mat_sig = [dim, axis]
+    arr_sig = list(range(dim))
+    out_sig = list(range(dim))
+    out_sig[axis] = dim
+    # Handle sparse matrices
+    if sparse.isspmatrix(matrix):
+        matrix = matrix.toarray()
+    return np.einsum(matrix, mat_sig, array, arr_sig, out_sig, **kw)
+
 
 class Basis:
 
     def __init__(self, N, interval):
         self.N = N
         self.interval = interval
+
+
+class Chebyshev(Basis):
+
+    def __init__(self, N, interval=(-1, 1)):
+        super().__init__(N, interval)
+
+    def grid(self, scale=1):
+        N_grid = int(np.ceil(self.N*scale))
+        i = np.arange(N_grid)
+        x = np.cos((2*i+1)/(2*N_grid)*np.pi)
+        a, b = self.interval
+        return a + (b-a)*(x+1)/2
+
+    def transform_to_grid(self, data, axis, dtype, scale=1):
+        N_grid = int(np.ceil(self.N*scale))
+        shape = list(data.shape)
+        shape[axis] = N_grid
+        coeff_data = np.zeros(shape, dtype=dtype)
+        zero = axslice(axis, 0, 1)
+        coeff_data[zero] = data[zero]
+        nonzero = axslice(axis, 1, self.N)
+        coeff_data[nonzero] = data[nonzero]/2
+        return scipy.fft.dct(coeff_data, type=3, axis=axis)
+
+    def transform_to_coeff(self, data, axis, dtype):
+        coeff_data = scipy.fft.dct(data, type=2, axis=axis)
+        coeff_data = coeff_data[axslice(axis, 0, self.N)]
+        N_grid = data.shape[axis]
+        coeff_data[axslice(axis, 0, 1)] /= 2*N_grid
+        coeff_data[axslice(axis, 1, self.N)] /= N_grid
+        return coeff_data
 
 
 class Fourier(Basis):
@@ -57,6 +102,19 @@ class Fourier(Basis):
             return self.wavenumbers(dtype=dtype)[::2]
         else:
             return self.wavenumbers(dtype=dtype)
+
+    def derivative_matrix(self, dtype=np.float64):
+        if dtype == np.float64:
+            upper_diag = np.zeros(self.N-1)
+            upper_diag[::2] = -self.unique_wavenumbers(dtype)
+            lower_diag = -upper_diag
+            return sparse.diags([upper_diag, lower_diag], offsets=[1, -1])
+        elif dtype == np.complex128:
+            return sparse.diags(1j*self.wavenumbers(dtype))
+
+    def differentiate(self, data, axis, dtype=np.float64):
+        D = self.derivative_matrix(dtype)
+        return apply_matrix(D, data, axis)
 
     def slice(self, wavenumber, dtype=np.float64):
         i = np.argwhere(self.unique_wavenumbers(dtype) == wavenumber)[0,0]
@@ -168,7 +226,7 @@ class Domain:
         else:
             self.bases = tuple(bases)
         self.dim = len(self.bases)
-
+        # self.interval = bases[0].interval
     @property
     def coeff_shape(self):
         return [basis.N for basis in self.bases]
@@ -195,6 +253,10 @@ class Field:
         self.dtype = dtype
         self.data = np.zeros(domain.coeff_shape, dtype=dtype)
         self.coeff = np.array([True]*self.data.ndim)
+
+    def differentiate(self, axis):
+        self.require_coeff_space()
+        return self.domain.bases[axis].differentiate(self.data, axis, self.dtype)
 
     def pencil_length(self):
         N = self.domain.bases[-1].N
@@ -238,8 +300,9 @@ class Field:
 
 class Problem:
 
-    def __init__(self, domain, variables, dtype=np.float64):
+    def __init__(self, domain, variables, num_BCs=0, dtype=np.float64):
         self.variables = variables
+        self.num_BCs = num_BCs
         self.build_permutation()
         self.dtype = dtype
         self.pencils = []
@@ -253,27 +316,29 @@ class Problem:
         else:
             slices = [slice(None, None, None)]
             self.pencils.append(Pencil(slices, 1))
-        self.X = StateVector(variables, self)
+        self.X = StateVector(variables, self, num_BCs=num_BCs)
 
     def build_permutation(self):
         variable_length = self.variables[0].domain.bases[-1].N
         pencil_length = self.variables[0].pencil_length()
-        data_size = len(self.variables)*pencil_length
-        num_variables = data_size // variable_length
-        indices = np.arange(data_size)
-        n0, n1 = np.divmod(indices, variable_length)
-        perm_indices = n1*num_variables + n0
-        data = np.ones(data_size)
-        row = perm_indices
-        col = indices
+        field_data_size = len(self.variables)*pencil_length
+        num_variables = field_data_size // variable_length
+        field_indices = np.arange(field_data_size)
+        n0, n1 = np.divmod(field_indices, variable_length)
+        perm_field_indices = n1*num_variables + n0
+        data = np.ones(field_data_size + self.num_BCs)
+        row = np.arange(field_data_size + self.num_BCs)
+        col = np.arange(field_data_size + self.num_BCs)
+        row[:field_data_size] = perm_field_indices
+        col[:field_data_size] = field_indices
         self.P = sparse.coo_matrix((data, (row, col)))
 
 
 class InitialValueProblem(Problem):
 
-    def __init__(self, domain, variables, RHS_variables, dtype=np.float64):
-        super().__init__(domain, variables, dtype=dtype)
-        self.F = StateVector(RHS_variables, self)
+    def __init__(self, domain, variables, RHS_variables, num_BCs=0, dtype=np.float64):
+        super().__init__(domain, variables, num_BCs=num_BCs, dtype=dtype)
+        self.F = StateVector(RHS_variables, self, num_BCs=num_BCs)
 
 
 class Timestepper:
@@ -299,7 +364,10 @@ class Timestepper:
                 p.F.append(np.zeros(shape, problem.dtype))
             p.RHS = np.zeros(shape, problem.dtype)
 
-    def step(self, dt):
+            if problem.num_BCs > 0:
+                p.taus = np.zeros(problem.num_BCs, dtype=problem.dtype)
+
+    def step(self, dt, BCs=None):
         problem = self.problem
         X = problem.X
         F = problem.F
@@ -308,7 +376,7 @@ class Timestepper:
         a, b, c = self.coefficients(self.dt, self.iteration)
         P = self.problem.P
         for p in problem.pencils:
-            F.gather(p)
+            F.gather(p, BCs)
             p.F.rotate()
             np.copyto(p.F[0], F.vector)
 
@@ -331,10 +399,14 @@ class Timestepper:
 
             if self.a0_old != a[0] or self.b0_old != b[0]:
                 LHS = P @ (a[0]*p.M + b[0]*p.L) @ P.T
-                p.LU = spla.splu(LHS.astype(problem.dtype))
+                LHS = LHS.astype(problem.dtype)
+                p.LU = spla.splu(LHS)
             Xbar = p.LU.solve(p.RHS)
             X.vector = P.T @ Xbar
-            X.scatter(p)
+            if problem.num_BCs > 0:
+                X.scatter(p, p.taus)
+            else:
+                X.scatter(p)
 
         self.a0_old = a[0]
         self.b0_old = b[0]
@@ -408,22 +480,27 @@ class BoundaryValueProblem(Problem):
 
 class StateVector:
 
-    def __init__(self, fields, problem):
+    def __init__(self, fields, problem, num_BCs=0):
         self.dtype = problem.dtype
         self.fields = fields
         self.pencils = problem.pencils
-        data_size = len(fields)*fields[0].pencil_length()
+        self.num_BCs = num_BCs
+        data_size = len(fields)*fields[0].pencil_length() + num_BCs
         self.vector = np.zeros(data_size, dtype=self.dtype)
 
-    def gather(self, p):
+    def gather(self, p, BCs=None):
         for field in self.fields:
             field.require_coeff_space()
         p.gather(self.fields, self.vector)
+        if not (BCs is None):
+            self.vector[-self.num_BCs:] = BCs
 
-    def scatter(self, p):
+    def scatter(self, p, taus=None):
         for field in self.fields:
             field.require_coeff_space()
         p.scatter(self.fields, self.vector)
+        if not (taus is None):
+            np.copyto(taus, self.vector[-self.num_BCs:])
 
 
 class Pencil:
