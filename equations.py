@@ -77,15 +77,15 @@ class SoundWaves:
         x_basis = self.x_basis
         D = self.D
         C = self.C
-        gridnum = 256
+        # gridnum = 256
         for i in range(num_steps):
             u.require_coeff_space()
             pre.require_coeff_space()
             p_RHS.require_coeff_space()
             p0.require_coeff_space()
             p_RHS.data = spla.spsolve(C, D@u.data)
-            p_RHS.require_grid_space(scales=gridnum//x_basis.N)
-            p0.require_grid_space(scales=gridnum//x_basis.N)
+            p_RHS.require_grid_space(scales=3/2)
+            p0.require_grid_space(scales=3/2)
             p_RHS.data = (1-p0.data) * p_RHS.data
             p_RHS.require_coeff_space()
             p_RHS.data = C@p_RHS.data
@@ -170,14 +170,14 @@ class CGLEquation:
         c = self.c
         C = self.C
         N = self.N
-        gridnum = 256
+        # gridnum = 256
         for i in range(num_steps):
             u.require_coeff_space()
             ux.require_coeff_space()
             ux_RHS.require_coeff_space()
-            u.require_grid_space(scales=gridnum//N)
-            ux.require_grid_space(scales=gridnum//N)
-            ux_RHS.require_grid_space(scales=gridnum//N)
+            u.require_grid_space(scales=3/2)
+            ux.require_grid_space(scales=3/2)
+            ux_RHS.require_grid_space(scales=3/2)
             ux_RHS.data = -(1+1j*c) * np.abs(u.data)**2  * u.data
             ux_RHS.require_coeff_space()
             ux_RHS.data = C @ ux_RHS.data
